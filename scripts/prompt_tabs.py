@@ -1,3 +1,7 @@
+import os
+
+from fastapi import FastAPI
+
 from modules import script_callbacks, shared
 
 
@@ -38,4 +42,15 @@ def on_ui_settings():
     )
 
 
+def on_app_started(_, app: FastAPI):
+    # Used by the JSON Builder tab's reference image picker: the output folder is copied to the
+    # clipboard so it can be pasted into the file dialog
+    @app.get("/prompt_tabs/output_dir")
+    def output_dir(tab: str = "txt2img"):
+        key = "outdir_img2img_samples" if tab == "img2img" else "outdir_txt2img_samples"
+        path = getattr(shared.opts, key, "") or shared.opts.outdir_samples
+        return {"path": os.path.abspath(path) if path else ""}
+
+
 script_callbacks.on_ui_settings(on_ui_settings)
+script_callbacks.on_app_started(on_app_started)

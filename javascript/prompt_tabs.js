@@ -6,6 +6,7 @@
     const COUNT_KEY = (t) => `prompt_tabs_count_${t}`;
     const DATA_KEY = (t) => `prompt_tabs_data_${t}`;
     const NAMES_KEY = (t) => `prompt_tabs_names_${t}`;
+    const TYPES_KEY = (t) => `prompt_tabs_types_${t}`;
     const META_KEY = (t) => `prompt_tabs_meta_${t}`;
 
     function lsGet(key) {
@@ -41,6 +42,27 @@
     // Default is on, so only an explicit false disables it
     function expandEnabled() {
         return !(typeof opts === "object" && opts.prompt_tabs_expand === false);
+    }
+
+    // JSON Builder tabs are only offered for the "moss" UI preset (the builder and its
+    // compiler are bundled with this extension)
+    function presetIsMoss() {
+        const input = gradioApp().getElementById("forge_ui_preset")?.querySelector("input");
+        if (input) return input.value === "moss";
+        return typeof opts === "object" && opts.forge_preset === "moss";
+    }
+
+    function builderUsable() {
+        return !!(window.PromptTabsBuilder && window.PromptTabsBuilder.available() && presetIsMoss());
+    }
+
+    // Sets a Gradio number/slider field the way a user would
+    function setField(elemId, value) {
+        const el = gradioApp().querySelector(`#${elemId} input`);
+        if (!el) return;
+        el.value = value;
+        if (typeof updateInput === "function") updateInput(el);
+        else el.dispatchEvent(new Event("input", { bubbles: true }));
     }
 
     // Sets value the same way a user would so Gradio and other extensions react.
@@ -79,6 +101,7 @@
         if (!getP() || !getN()) return false;
 
         container.dataset.promptTabs = "1";
+        container.classList.add("prompt-tabs-container");
 
         // Slot 0 adopts whatever the real textareas hold at load (default settings / other
         // extensions decide that). The other slots start empty unless restored below.
@@ -88,7 +111,7 @@
         tabs[0] = { p: getP().value, n: getN().value };
         let active = 0;
 
-        // Custom tab names (null = default "Prompt N"). Kept until the tab is closed; independent
+        // Custom tab names (null = default name). Kept until the tab is closed; independent
         // of the prompt-memory setting.
         const names = [];
         try {
@@ -101,7 +124,34 @@
             for (let i = 0; i < count; i++) names.push(null);
         }
         const saveNames = () => lsSet(NAMES_KEY(tabname), JSON.stringify(names));
-        const tabLabel = (i) => names[i] || (i === 0 ? "Default" : `Prompt ${i + 1}`);
+
+        // Tab types: "prompt" (the normal textboxes) or "builder" (JSON Builder replacing them).
+        // The first tab is always a prompt tab. Builder tabs are kept but hidden while the UI
+        // preset isn't "moss".
+        const types = [];
+        try {
+            const saved = JSON.parse(lsGet(TYPES_KEY(tabname)));
+            for (let i = 0; i < count; i++) {
+                types.push(i > 0 && Array.isArray(saved) && saved[i] === "builder" ? "builder" : "prompt");
+            }
+        } catch (e) {
+            for (let i = 0; i < count; i++) types.push("prompt");
+        }
+        const saveTypes = () => lsSet(TYPES_KEY(tabname), JSON.stringify(types));
+
+        // Parallel to tabs: null for prompt tabs, { state, inst } for builder tabs. `state` is the
+        // saved snapshot, `inst` the live builder instance (created when first shown).
+        const builds = types.map((t) => (t === "builder" ? { state: null, inst: null } : null));
+
+        const tabVisible = (i) => types[i] !== "builder" || builderUsable();
+
+        const tabLabel = (i) => {
+            if (names[i]) return names[i];
+            if (i === 0) return "Default";
+            let k = 0;
+            for (let j = 0; j <= i; j++) if (types[j] === types[i]) k++;
+            return types[i] === "builder" ? `JSON ${k}` : `Prompt ${k}`;
+        };
 
         // Wrapper becomes the parent; the original container (and its children) is moved
         // as-is, so ids/classes/listeners that other extensions rely on stay untouched.
@@ -143,12 +193,48 @@
             setTextarea(getN(), tabs[active].n);
         }
 
+        // ----- JSON Builder instances -----
+
+        function ensureInst(i) {
+            const b = builds[i];
+            if (!b) return null;
+            if (!b.inst) {
+                b.inst = window.PromptTabsBuilder.create({ tabname, state: b.state, onChange: () => schedulePersist() });
+                b.inst.hide();
+                wrapper.insertBefore(b.inst.root, container);
+            }
+            return b.inst;
+        }
+
+        function buildState(i) {
+            const b = builds[i];
+            if (!b) return null;
+            return b.inst ? b.inst.getState() : b.state;
+        }
+
+        // Shows the builder instead of the prompt boxes while a builder tab is active
+        function updateMode() {
+            const builderActive = types[active] === "builder" && builderUsable();
+            wrapper.classList.toggle("pt-builder-active", builderActive);
+            builds.forEach((b) => {
+                if (b && b.inst) b.inst.hide();
+            });
+            if (builderActive) ensureInst(active).show();
+        }
+
+        // ----- persistence -----
+
         // Persistent memory: every tab except the first. The first tab is the default tab,
         // always active after a reload so default prompt handling can write to it.
         function persist() {
             if (!rememberEnabled()) return;
             stash();
-            const data = tabs.map((t, i) => (i === 0 ? null : { p: t.p, n: t.n }));
+            const data = tabs.map((t, i) => {
+                if (i === 0) return null;
+                const entry = { p: t.p, n: t.n };
+                if (builds[i]) entry.b = buildState(i);
+                return entry;
+            });
             lsSet(DATA_KEY(tabname), JSON.stringify(data));
             // The default tab's own text and which tab was active, so that a reload can detect
             // that the box held another tab's prompt (and default handling saved that instead)
@@ -185,26 +271,37 @@
                 const t = data[i];
                 if (i === active || !t || typeof t.p !== "string" || typeof t.n !== "string") continue;
                 tabs[i] = { p: t.p, n: t.n };
+                if (builds[i] && !builds[i].inst && t.b && typeof t.b === "object") builds[i].state = t.b;
             }
         }
 
-        // Used by the settings button: wipes stored data and the in-session text of the
+        // Used by the settings button: wipes stored data and the in-session content of the
         // non-default inactive tabs, so it can't be written back.
         clearers.push(() => {
             clearTimeout(persistTimer);
             lsRemove(DATA_KEY(tabname));
             lsRemove(META_KEY(tabname));
             for (let i = 1; i < tabs.length; i++) {
-                if (i !== active) tabs[i] = { p: "", n: "" };
+                if (i === active) continue;
+                tabs[i] = { p: "", n: "" };
+                if (builds[i]) {
+                    if (builds[i].inst) builds[i].inst.destroy();
+                    builds[i] = { state: null, inst: null };
+                }
             }
             persist();
         });
 
+        // ----- tab bar -----
+
         function render() {
             list.textContent = "";
             tabs.forEach((_, i) => {
+                if (!tabVisible(i)) return;
+
                 const tab = document.createElement("div");
-                tab.className = "prompt-tabs-tab" + (i === active ? " active" : "");
+                tab.className = "prompt-tabs-tab" + (types[i] === "builder" ? " builder" : "") + (i === active ? " active" : "");
+                tab.dataset.index = String(i);
 
                 const label = document.createElement("button");
                 label.type = "button";
@@ -216,7 +313,7 @@
                 tab.append(label);
 
                 tab.append(
-                    mkBtn("pt-clone", "⧉", "Clone this prompt tab", (e) => {
+                    mkBtn("pt-clone", "⧉", "Clone this tab", (e) => {
                         e.stopPropagation();
                         cloneTab(i);
                     })
@@ -225,7 +322,7 @@
                 // The first tab can't be closed, so there is always a tab to type in
                 if (i > 0) {
                     tab.append(
-                        mkBtn("pt-close", "✕", "Close this prompt tab", (e) => {
+                        mkBtn("pt-close", "✕", "Close this tab", (e) => {
                             e.stopPropagation();
                             closeTab(i);
                         })
@@ -239,8 +336,8 @@
         // Toggling classes instead of rebuilding keeps the label element alive between the
         // two clicks of a double-click, so renaming works on a not-yet-active tab too.
         function updateActive() {
-            list.querySelectorAll(".prompt-tabs-tab").forEach((el, k) => {
-                el.classList.toggle("active", k === active);
+            list.querySelectorAll(".prompt-tabs-tab").forEach((el) => {
+                el.classList.toggle("active", Number(el.dataset.index) === active);
             });
         }
 
@@ -279,17 +376,22 @@
             active = i;
             apply();
             updateActive();
+            updateMode();
             persist();
         }
 
-        function insertTab(at, data) {
+        function insertTab(at, data, type = "prompt", bstate = null) {
             stash();
             tabs.splice(at, 0, data);
             names.splice(at, 0, null);
+            types.splice(at, 0, type);
+            builds.splice(at, 0, type === "builder" ? { state: bstate, inst: null } : null);
             saveNames();
+            saveTypes();
             active = at;
             apply();
             render();
+            updateMode();
             lsSet(COUNT_KEY(tabname), String(tabs.length));
             persist();
         }
@@ -298,26 +400,42 @@
             insertTab(tabs.length, { p: "", n: "" });
         }
 
+        function addBuilderTab() {
+            if (!builderUsable()) return;
+            insertTab(tabs.length, { p: "", n: "" }, "builder");
+        }
+
         function cloneTab(i) {
             stash();
-            insertTab(i + 1, { p: tabs[i].p, n: tabs[i].n });
+            const type = types[i];
+            const bstate = type === "builder" ? JSON.parse(JSON.stringify(buildState(i))) : null;
+            insertTab(i + 1, { p: tabs[i].p, n: tabs[i].n }, type, bstate);
         }
 
         function closeTab(i) {
             if (i <= 0 || i >= tabs.length) return;
             stash();
-            tabs.splice(i, 1); // memory and name of this tab are dropped with it
+            if (builds[i] && builds[i].inst) builds[i].inst.destroy();
+            // memory, name and type of this tab are dropped with it
+            tabs.splice(i, 1);
             names.splice(i, 1);
+            types.splice(i, 1);
+            builds.splice(i, 1);
             saveNames();
+            saveTypes();
             if (i < active) active--;
             else active = Math.min(active, tabs.length - 1);
             apply();
             render();
+            updateMode();
             lsSet(COUNT_KEY(tabname), String(tabs.length));
             persist();
         }
 
         tools.append(mkBtn("pt-new", "＋", "New empty prompt tab", addTab));
+        const builderBtn = mkBtn("pt-builder", "{ }", "New JSON Builder tab (MOSS preset only)", addBuilderTab);
+        builderBtn.style.display = "none";
+        tools.append(builderBtn);
 
         // Keep memory in sync with any edit (typing, paste params, styles, other extensions)
         // Delegated on the (stable) container so it survives textbox re-renders
@@ -329,8 +447,59 @@
         });
         window.addEventListener("pagehide", persist);
 
+        // ----- generate: a builder tab compiles its layout into the prompt at this point -----
+
+        let bypass = false;
+        gradioApp().addEventListener(
+            "click",
+            (e) => {
+                if (bypass) return;
+                const btn = e.target instanceof Element ? e.target.closest(`#${tabname}_generate`) : null;
+                if (!btn) return;
+                if (types[active] !== "builder" || !builderUsable()) return;
+
+                // Hold the click until the compiled prompt has reached Gradio's state
+                e.preventDefault();
+                e.stopImmediatePropagation();
+
+                const out = ensureInst(active).compile();
+                if (!out) return; // invalid layout: nothing is generated, fields are marked
+
+                tabs[active] = { p: out.prompt, n: out.negative };
+                apply();
+                setField(`${tabname}_width`, out.width);
+                setField(`${tabname}_height`, out.height);
+
+                setTimeout(() => {
+                    bypass = true;
+                    try {
+                        btn.click();
+                    } finally {
+                        bypass = false;
+                    }
+                }, 0);
+            },
+            true
+        );
+
+        // ----- UI preset: builder tabs exist only for "moss" -----
+
+        let lastUsable = null;
+        function refreshPreset() {
+            const usable = builderUsable();
+            if (usable === lastUsable) return;
+            lastUsable = usable;
+            builderBtn.style.display = usable ? "" : "none";
+            if (!usable && types[active] === "builder") switchTo(0);
+            render();
+            updateMode();
+        }
+        onUiUpdate(refreshPreset);
+        onAfterUiUpdate(refreshPreset);
+
         render();
         lsSet(COUNT_KEY(tabname), String(tabs.length));
+        refreshPreset();
 
         // Settings load asynchronously. Turning the setting off does not clear anything
         // right away; stale data is dropped here, on the next page load.
@@ -344,6 +513,7 @@
                 lsRemove(DATA_KEY(tabname));
                 lsRemove(META_KEY(tabname));
             }
+            refreshPreset();
         });
 
         // Turning the setting on mid-session starts saving immediately
