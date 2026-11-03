@@ -36,7 +36,7 @@ Settings → UI → Prompt Tabs
 
 ## JSON Builder tab (MOSS preset)
 
-Available only while the UI Preset is `moss`; otherwise the button and builder tabs are hidden. The builder is bundled with this extension (based on the MOSS JSON Builder), so no other extension is required.
+Available only while the UI Preset is `moss`; otherwise the button and builder tabs are hidden. The builder is bundled with modified `sd_forge_json_builder`, so no other extension is required.
 
 - **`{ }`** button adds a JSON Builder tab. It replaces the positive/negative prompt boxes while active.
 - On **Generate** the layout is validated and compiled into the positive prompt, the **Negative prompt** box (bottom of the Summary section) is used as the negative prompt, and width/height are set to the canvas size. Invalid layouts (empty captions) block generation and are outlined in red.
