@@ -17,20 +17,76 @@
         }
     }
 
-    function lsSet(key, value) {
-        try {
-            localStorage.setItem(key, value);
-        } catch (e) {}
-    }
-
     function lsRemove(key) {
         try {
             localStorage.removeItem(key);
         } catch (e) {}
     }
 
+    // ----- stored state: a JSON file in the extension's folder, via /prompt_tabs/state -----
+    // { txt2img: { count, names, types, data, meta }, img2img: { ... } }
+    // (older versions kept this in the browser's localStorage; it is migrated once)
+
+    const STATE_URL = "/prompt_tabs/state";
+    let store = null; // stays null until the file has been loaded
+    let saveTimer = null;
+
+    function tabStore(tabname) {
+        if (!store[tabname] || typeof store[tabname] !== "object") store[tabname] = {};
+        return store[tabname];
+    }
+
+    function flushStore(keepalive, onOk) {
+        clearTimeout(saveTimer);
+        if (store === null) return;
+        const body = JSON.stringify(store);
+        // keepalive requests (used while the page is closing) are limited to ~64 KB
+        fetch(STATE_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+            keepalive: !!keepalive && body.length < 60000,
+        })
+            .then((r) => {
+                if (r.ok && onOk) onOk();
+            })
+            .catch(() => {});
+    }
+
+    function saveStore() {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => flushStore(false), 300);
+    }
+
+    function migrateFromLocalStorage(tabname) {
+        const st = tabStore(tabname);
+        if (Object.keys(st).length > 0) return;
+        const read = (key) => {
+            try {
+                return JSON.parse(lsGet(key));
+            } catch (e) {
+                return null;
+            }
+        };
+        const count = parseInt(lsGet(COUNT_KEY(tabname)), 10);
+        if (Number.isFinite(count)) st.count = count;
+        const names = read(NAMES_KEY(tabname));
+        if (Array.isArray(names)) st.names = names;
+        const types = read(TYPES_KEY(tabname));
+        if (Array.isArray(types)) st.types = types;
+        const data = read(DATA_KEY(tabname));
+        if (Array.isArray(data)) st.data = data;
+        const meta = read(META_KEY(tabname));
+        if (meta && typeof meta === "object") st.meta = meta;
+        if (Object.keys(st).length === 0) return;
+        // old keys are only removed once the file has been written
+        flushStore(false, () => {
+            [COUNT_KEY, NAMES_KEY, TYPES_KEY, DATA_KEY, META_KEY].forEach((k) => lsRemove(k(tabname)));
+        });
+    }
+
     function loadCount(tabname) {
-        const n = parseInt(lsGet(COUNT_KEY(tabname)), 10);
+        const n = parseInt(tabStore(tabname).count, 10);
         return Number.isFinite(n) && n >= 1 ? Math.min(n, 50) : 1;
     }
 
@@ -103,6 +159,8 @@
         container.dataset.promptTabs = "1";
         container.classList.add("prompt-tabs-container");
 
+        migrateFromLocalStorage(tabname);
+
         // Slot 0 adopts whatever the real textareas hold at load (default settings / other
         // extensions decide that). The other slots start empty unless restored below.
         const count = loadCount(tabname);
@@ -115,30 +173,28 @@
         // Custom tab names (null = default name). Kept until the tab is closed; independent
         // of the prompt-memory setting.
         const names = [];
-        try {
-            const saved = JSON.parse(lsGet(NAMES_KEY(tabname)));
-            for (let i = 0; i < count; i++) {
-                const s = Array.isArray(saved) ? saved[i] : null;
-                names.push(typeof s === "string" && s.trim() ? s : null);
-            }
-        } catch (e) {
-            for (let i = 0; i < count; i++) names.push(null);
+        const savedNames = tabStore(tabname).names;
+        for (let i = 0; i < count; i++) {
+            const s = Array.isArray(savedNames) ? savedNames[i] : null;
+            names.push(typeof s === "string" && s.trim() ? s : null);
         }
-        const saveNames = () => lsSet(NAMES_KEY(tabname), JSON.stringify(names));
+        const saveNames = () => {
+            tabStore(tabname).names = names;
+            saveStore();
+        };
 
         // Tab types: "prompt" (the normal textboxes) or "builder" (JSON Builder replacing them).
         // The first tab is always a prompt tab. Builder tabs are kept but hidden while the UI
         // preset isn't "moss".
         const types = [];
-        try {
-            const saved = JSON.parse(lsGet(TYPES_KEY(tabname)));
-            for (let i = 0; i < count; i++) {
-                types.push(i > 0 && Array.isArray(saved) && saved[i] === "builder" ? "builder" : "prompt");
-            }
-        } catch (e) {
-            for (let i = 0; i < count; i++) types.push("prompt");
+        const savedTypes = tabStore(tabname).types;
+        for (let i = 0; i < count; i++) {
+            types.push(i > 0 && Array.isArray(savedTypes) && savedTypes[i] === "builder" ? "builder" : "prompt");
         }
-        const saveTypes = () => lsSet(TYPES_KEY(tabname), JSON.stringify(types));
+        const saveTypes = () => {
+            tabStore(tabname).types = types;
+            saveStore();
+        };
 
         // Parallel to tabs: null for prompt tabs, { state, inst } for builder tabs. `state` is the
         // saved snapshot, `inst` the live builder instance (created when first shown).
@@ -243,10 +299,12 @@
                 if (builds[i]) entry.b = buildState(i);
                 return entry;
             });
-            lsSet(DATA_KEY(tabname), JSON.stringify(data));
+            const st = tabStore(tabname);
+            st.data = data;
             // The default tab's own text and which tab was active, so that a reload can detect
             // that the box held another tab's prompt (and default handling saved that instead)
-            lsSet(META_KEY(tabname), JSON.stringify({ active, p: tabs[0].p, n: tabs[0].n }));
+            st.meta = { active, p: tabs[0].p, n: tabs[0].n };
+            saveStore();
         }
 
         let persistTimer = null;
@@ -283,20 +341,14 @@
             // If another tab was active when the page closed, the prompt box held that tab's
             // text, so default prompt handling may have saved it. Put the default tab's own
             // text back instead of letting the active tab's prompt replace it.
-            try {
-                const meta = JSON.parse(lsGet(META_KEY(tabname)));
-                if (meta && meta.active > 0 && typeof meta.p === "string" && typeof meta.n === "string") {
-                    tabs[0] = { p: meta.p, n: meta.n };
-                    pendingPin = { p: meta.p, n: meta.n };
-                }
-            } catch (e) {}
-
-            let data;
-            try {
-                data = JSON.parse(lsGet(DATA_KEY(tabname)));
-            } catch (e) {
-                return;
+            const st = tabStore(tabname);
+            const meta = st.meta;
+            if (meta && meta.active > 0 && typeof meta.p === "string" && typeof meta.n === "string") {
+                tabs[0] = { p: meta.p, n: meta.n };
+                pendingPin = { p: meta.p, n: meta.n };
             }
+
+            const data = st.data;
             if (!Array.isArray(data)) return;
             for (let i = 1; i < tabs.length; i++) {
                 const t = data[i];
@@ -310,8 +362,10 @@
         // non-default inactive tabs, so it can't be written back.
         clearers.push(() => {
             clearTimeout(persistTimer);
-            lsRemove(DATA_KEY(tabname));
-            lsRemove(META_KEY(tabname));
+            const st = tabStore(tabname);
+            delete st.data;
+            delete st.meta;
+            saveStore();
             for (let i = 1; i < tabs.length; i++) {
                 if (i === active) continue;
                 tabs[i] = { p: "", n: "" };
@@ -424,7 +478,8 @@
             apply();
             render();
             updateMode();
-            lsSet(COUNT_KEY(tabname), String(tabs.length));
+            tabStore(tabname).count = tabs.length;
+            saveStore();
             persist();
         }
 
@@ -460,7 +515,8 @@
             apply();
             render();
             updateMode();
-            lsSet(COUNT_KEY(tabname), String(tabs.length));
+            tabStore(tabname).count = tabs.length;
+            saveStore();
             persist();
         }
 
@@ -479,7 +535,10 @@
             else return;
             schedulePersist();
         });
-        window.addEventListener("pagehide", persist);
+        window.addEventListener("pagehide", () => {
+            persist();
+            flushStore(true);
+        });
 
         // ----- generate: a builder tab compiles its layout into the prompt at this point -----
 
@@ -541,7 +600,8 @@
         onAfterUiUpdate(refreshPreset);
 
         render();
-        lsSet(COUNT_KEY(tabname), String(tabs.length));
+        tabStore(tabname).count = tabs.length;
+        saveStore();
         refreshPreset();
 
         // Settings load asynchronously. Turning the setting off does not clear anything
@@ -557,8 +617,10 @@
                 render();
                 persist();
             } else {
-                lsRemove(DATA_KEY(tabname));
-                lsRemove(META_KEY(tabname));
+                const st = tabStore(tabname);
+                delete st.data;
+                delete st.meta;
+                saveStore();
             }
             refreshPreset();
         });
@@ -605,7 +667,7 @@
     let buttonDone = false;
     function trySetup() {
         if (!buttonDone) buttonDone = setupClearButton();
-        if (pending.size === 0) return;
+        if (store === null || pending.size === 0) return; // wait for the stored state
         for (const t of [...pending]) {
             try {
                 if (setup(t)) pending.delete(t);
@@ -617,4 +679,12 @@
     }
     onUiLoaded(trySetup);
     onUiUpdate(trySetup);
+
+    fetch(STATE_URL)
+        .then((r) => (r.ok ? r.json() : {}))
+        .catch(() => ({}))
+        .then((s) => {
+            store = s && typeof s === "object" && !Array.isArray(s) ? s : {};
+            trySetup();
+        });
 })();

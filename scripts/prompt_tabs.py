@@ -1,8 +1,14 @@
+import json
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 
 from modules import script_callbacks, shared
+
+# Tab / prompt state lives next to the extension instead of in the browser's limited localStorage
+EXTENSION_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATE_FILE = os.path.join(EXTENSION_DIR, "prompt_tabs_data.json")
+MAX_STATE_BYTES = 50 * 1024 * 1024
 
 
 def on_ui_settings():
@@ -50,6 +56,34 @@ def on_app_started(_, app: FastAPI):
         key = "outdir_img2img_samples" if tab == "img2img" else "outdir_txt2img_samples"
         path = getattr(shared.opts, key, "") or shared.opts.outdir_samples
         return {"path": os.path.abspath(path) if path else ""}
+
+    @app.get("/prompt_tabs/state")
+    def get_state():
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @app.post("/prompt_tabs/state")
+    async def save_state(request: Request):
+        raw = await request.body()
+        if len(raw) > MAX_STATE_BYTES:
+            raise HTTPException(status_code=413, detail="State too large")
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid JSON")
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="Expected a JSON object")
+
+        # write to a temp file first so a crash can't leave a half-written state file
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, STATE_FILE)
+        return {"ok": True}
 
 
 script_callbacks.on_ui_settings(on_ui_settings)

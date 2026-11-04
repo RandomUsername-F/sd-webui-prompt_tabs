@@ -20,10 +20,12 @@ The real prompt textareas are never replaced; their values are swapped and `inpu
 
 ## Persistence
 
+All stored state is kept in `prompt_tabs_data.json` in this extension's folder, not in the browser's localStorage.
+
 | What | Stored | Notes |
 | --- | --- | --- |
-| Tab count, names, types | Browser (localStorage) | Kept until the tab is closed |
-| Prompts of extra tabs | Browser (localStorage) | Needs the "Remember" setting |
+| Tab count, names, types | `prompt_tabs_data.json` | Kept until the tab is closed |
+| Prompts of extra tabs | `prompt_tabs_data.json` | Needs the "Remember" setting |
 | Default tab prompt | Not stored by this extension | Handled by default prompt handling / other extensions |
 
 ## Settings
@@ -49,5 +51,5 @@ Available only while the UI Preset is `moss`; otherwise the button and builder t
 - `javascript/prompt_tabs.js`: tab logic
 - `javascript/json_builder_tab.js`: embeddable JSON Builder
 - `javascript/json_codec.js`: bundled MOSS prompt compiler/decompiler
-- `scripts/prompt_tabs.py`: settings and an output-folder endpoint
+- `scripts/prompt_tabs.py`: settings, output-folder endpoint and state file endpoint
 - `style.css`
