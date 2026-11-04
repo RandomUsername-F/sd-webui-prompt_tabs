@@ -39,7 +39,7 @@ Settings → UI → Prompt Tabs
 Available only while the UI Preset is `moss`; otherwise the button and builder tabs are hidden. The builder is bundled with modified `sd_forge_json_builder`, so no other extension is required.
 
 - **`{ }`** button adds a JSON Builder tab. It replaces the positive/negative prompt boxes while active.
-- On **Generate** the layout is validated and compiled into the positive prompt, the **Negative prompt** box (bottom of the Summary section) is used as the negative prompt, and width/height are set to the canvas size. Invalid layouts (empty captions) block generation and are outlined in red.
+- On **Generate** the layout is validated and compiled into the positive prompt, the **Negative prompt** box (bottom of the Summary section) is used as the negative prompt, and width/height are set to the canvas size. Invalid layouts (empty captions) block generation and are outlined in red. The real prompt boxes are only borrowed for the click and then put back, so they keep the default tab's text while a JSON tab is active.
 - With no saved canvas size, the txt2img/img2img width/height is used as default.
 - **Reference image:** load an image (button or drag & drop onto the canvas) with adjustable opacity and optional "Match size". Session only, not stored. In img2img, the input (subject) image is used as the reference by default and followed until you load or clear one yourself.
 - Layouts, including the negative prompt, are stored under the same "Remember" setting.

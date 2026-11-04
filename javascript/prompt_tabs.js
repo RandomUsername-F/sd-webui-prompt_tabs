@@ -110,6 +110,7 @@
         for (let i = 0; i < count; i++) tabs.push({ p: "", n: "" });
         tabs[0] = { p: getP().value, n: getN().value };
         let active = 0;
+        let swapping = false; // true while a JSON tab's compiled prompt is borrowed for Generate
 
         // Custom tab names (null = default name). Kept until the tab is closed; independent
         // of the prompt-memory setting.
@@ -181,16 +182,23 @@
         bar.append(list, tools);
         wrapper.append(bar, container);
 
+        // The real prompt boxes show the active prompt tab's text. A JSON tab has its own UI, so
+        // while it is active the boxes keep holding the default tab's text and are only
+        // borrowed during Generate.
+        const textTab = () => (types[active] === "builder" ? 0 : active);
+
         function stash() {
+            if (swapping) return;
             const p = getP();
             const n = getN();
             if (!p || !n) return;
-            tabs[active] = { p: p.value, n: n.value };
+            tabs[textTab()] = { p: p.value, n: n.value };
         }
 
         function apply() {
-            setTextarea(getP(), tabs[active].p);
-            setTextarea(getN(), tabs[active].n);
+            const t = tabs[textTab()];
+            setTextarea(getP(), t.p);
+            setTextarea(getN(), t.n);
         }
 
         // ----- JSON Builder instances -----
@@ -248,6 +256,28 @@
             persistTimer = setTimeout(persist, 500);
         }
 
+        // After a reload the default tab's own text is put back (see restore). Something else
+        // (default prompt handling, Gradio's own load events) may still write the previously
+        // active tab's prompt a moment later, so the text is held for a few seconds, or until
+        // the user types or switches tabs.
+        let pendingPin = null;
+        let pin = null;
+        let pinTimer = null;
+        function pinDefault(p, n) {
+            pin = { p, n, until: Date.now() + 6000 };
+            clearInterval(pinTimer);
+            pinTimer = setInterval(() => {
+                if (!pin || active !== 0 || Date.now() > pin.until) {
+                    clearInterval(pinTimer);
+                    pin = null;
+                    return;
+                }
+                tabs[0] = { p: pin.p, n: pin.n };
+                setTextarea(getP(), pin.p);
+                setTextarea(getN(), pin.n);
+            }, 250);
+        }
+
         function restore() {
             if (!rememberEnabled()) return;
             // If another tab was active when the page closed, the prompt box held that tab's
@@ -257,6 +287,7 @@
                 const meta = JSON.parse(lsGet(META_KEY(tabname)));
                 if (meta && meta.active > 0 && typeof meta.p === "string" && typeof meta.n === "string") {
                     tabs[0] = { p: meta.p, n: meta.n };
+                    pendingPin = { p: meta.p, n: meta.n };
                 }
             } catch (e) {}
 
@@ -374,6 +405,7 @@
             if (i === active || i < 0 || i >= tabs.length) return;
             stash();
             active = i;
+            pin = null;
             apply();
             updateActive();
             updateMode();
@@ -440,8 +472,10 @@
         // Keep memory in sync with any edit (typing, paste params, styles, other extensions)
         // Delegated on the (stable) container so it survives textbox re-renders
         container.addEventListener("input", (e) => {
-            if (e.target === getP()) tabs[active].p = e.target.value;
-            else if (e.target === getN()) tabs[active].n = e.target.value;
+            if (e.isTrusted) pin = null; // the user is typing: stop holding the default text
+            if (swapping) return;
+            if (e.target === getP()) tabs[textTab()].p = e.target.value;
+            else if (e.target === getN()) tabs[textTab()].n = e.target.value;
             else return;
             schedulePersist();
         });
@@ -465,8 +499,11 @@
                 const out = ensureInst(active).compile();
                 if (!out) return; // invalid layout: nothing is generated, fields are marked
 
-                tabs[active] = { p: out.prompt, n: out.negative };
-                apply();
+                // Borrow the prompt boxes for the compiled layout, replay the click, then put the
+                // default tab's text back so the boxes (and anything that saves them) never keep it
+                swapping = true;
+                setTextarea(getP(), out.prompt);
+                setTextarea(getN(), out.negative);
                 setField(`${tabname}_width`, out.width);
                 setField(`${tabname}_height`, out.height);
 
@@ -477,6 +514,12 @@
                     } finally {
                         bypass = false;
                     }
+                    // Gradio reads the input values while handling the click; restore afterwards
+                    setTimeout(() => {
+                        setTextarea(getP(), tabs[0].p);
+                        setTextarea(getN(), tabs[0].n);
+                        swapping = false;
+                    }, 100);
                 }, 0);
             },
             true
@@ -507,6 +550,10 @@
             if (rememberEnabled()) {
                 restore();
                 apply();
+                if (pendingPin) {
+                    pinDefault(pendingPin.p, pendingPin.n);
+                    pendingPin = null;
+                }
                 render();
                 persist();
             } else {
