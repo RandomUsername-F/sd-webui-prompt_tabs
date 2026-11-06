@@ -46,6 +46,7 @@
         const uid = ++uidCounter;
         const P = (s) => `ptb${uid}-${s}`;
         let idCounter = 0;
+        let zTop = 0; // stacking order of boxes on the canvas (higher = in front)
 
         // ----- state -----
 
@@ -71,7 +72,14 @@
         }
 
         function newItem() {
-            return { id: ++idCounter, label: "object", caption: "", text: "", bbox: defaultBbox() };
+            return { id: ++idCounter, label: "object", caption: "", text: "", bbox: defaultBbox(), z: ++zTop };
+        }
+
+        // Brings an item's box in front of the others (canvas click or list interaction)
+        function raise(item) {
+            item.z = ++zTop;
+            const ref = canvasRefs.get(item.id);
+            if (ref) ref.el.style.zIndex = String(item.z);
         }
 
         (function init() {
@@ -582,18 +590,21 @@
             const handle = h("div", { class: "ptb-box-handle" });
             handle.addEventListener("pointerdown", (ev) => {
                 if (ev.button !== 0) return;
+                raise(item);
                 startResize(item, ev);
             });
             el.appendChild(handle);
 
             el.addEventListener("pointerdown", (ev) => {
                 if (ev.button !== 0) return;
+                raise(item);
                 if (ev.target === handle) return;
                 if (ev.target.tagName === "TEXTAREA" && !ev.target.readOnly) return;
                 ev.preventDefault();
                 startDrag(item, ev);
             });
 
+            if (item.z) el.style.zIndex = String(item.z);
             canvasRefs.set(item.id, { el, caption, text });
             updateBoxPosition(item);
             return el;
@@ -812,6 +823,9 @@
                 return inp;
             });
             row.appendChild(nums);
+
+            row.addEventListener("pointerdown", () => raise(item));
+            row.addEventListener("focusin", () => raise(item));
 
             listRefs.set(item.id, { row, captionInput: caption, textInput, numInputs });
             return row;
